@@ -86,8 +86,8 @@ WAKE_PAUSE = 0.3
 
 # Thresholds para o chatbot (frases longas descrevendo reuniões)
 CHAT_TIMEOUT = 10           # espera até 10s pelo início da fala
-CHAT_PAUSE_THRESHOLD = 1.2  # pausa maior = não corta no meio da fala
-CHAT_PHRASE_TIME_LIMIT = 15 # até 15s de fala contínua
+CHAT_PAUSE_THRESHOLD = 2.0  # pausa de até 2s antes de considerar fim da fala
+CHAT_PHRASE_TIME_LIMIT = 30 # até 30s de fala contínua
 
 
 def _contains_wake_word(transcripts):
