@@ -24,6 +24,8 @@ RUN apt-get update \
 
 WORKDIR /app
 COPY --from=builder /opt/venv /opt/venv
-COPY main.py google_calendar.py chatbot.py tts.py ./
+COPY main.py ./
+COPY config.py calendar.py chat.py audio.py ./
+COPY utils/ ./utils/
 
 CMD ["python", "-u", "main.py"]
