@@ -19,3 +19,4 @@ services:
       - /dev/snd:/dev/snd
     volumes:
       - ./token.json:/data/token.json
+      - /etc/asound.conf:/etc/asound.conf:ro

@@ -68,17 +68,20 @@ def _play_audio(audio_bytes):
     errors = []
     try:
         for player in _get_players():
-            result = subprocess.run(
-                player + [tmp_path],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-            )
+            try:
+                result = subprocess.run(
+                    player + [tmp_path],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                )
+            except FileNotFoundError:
+                # Player não instalado (ex: paplay) — pula
+                continue
             if result.returncode == 0:
                 return
             # Coleta erro deste player para diagnóstico
             err = result.stderr.decode().strip()
-            if err:
-                errors.append(f"{' '.join(player)}: {err}")
+            errors.append(f"{' '.join(player)}: {err}" if err else f"{' '.join(player)}: exit code {result.returncode}")
         # Todos os players falharam
         raise RuntimeError("\n".join(errors) if errors else "Nenhum player de áudio funcionou")
     finally:
