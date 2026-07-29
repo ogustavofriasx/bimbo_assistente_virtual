@@ -33,7 +33,7 @@ def main():
     log.info("Iniciando fluxo de autorização OAuth do Google...")
 
     # Usa a configuração OAuth compartilhada (config.py)
-    # Elimina a duplicata que existia entre google_calendar.py e refresh_token.py
+    # Elimina a duplicata que existia entre calendar_service.py e refresh_token.py
     client_config = build_oauth_client_config()
     flow = InstalledAppFlow.from_client_config(client_config, CALENDAR_SCOPES)
 

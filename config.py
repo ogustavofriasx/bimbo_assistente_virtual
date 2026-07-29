@@ -218,7 +218,7 @@ def get_openai_client():
 def build_oauth_client_config():
     """Monta o dicionário de configuração OAuth do Google.
 
-    Usado por calendar.py (autenticação) e scripts/refresh_token.py
+    Usado por calendar_service.py (autenticação) e scripts/refresh_token.py
     (geração de token). Antes essa função existia em google_calendar.py
     e o dicionário era duplicado em refresh_token.py.
 

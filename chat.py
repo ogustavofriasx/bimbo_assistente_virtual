@@ -17,7 +17,7 @@ from collections import deque
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from calendar import (
+from calendar_service import (
     create_event,
     delete_event_by_keyword,
     list_events,
