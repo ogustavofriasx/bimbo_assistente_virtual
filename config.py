@@ -65,6 +65,13 @@ def load_env(path=".env"):
                 os.environ[key] = value
 
 
+# Carrega o .env imediatamente no import do módulo.
+# Isso garante que as constantes abaixo já encontrem as variáveis
+# definidas no arquivo .env, mesmo que o caller ainda não tenha
+# chamado load_env() explicitamente.
+load_env()
+
+
 # ══════════════════════════════════════════════════════════════════════
 # Wake Word
 # ══════════════════════════════════════════════════════════════════════
@@ -201,14 +208,17 @@ def get_openai_client():
     Raises:
         RuntimeError: Se OPENAI_API_KEY não estiver definida no .env.
     """
-    if not OPENAI_API_KEY:
+    # Lê do os.environ no momento da chamada (não da constante de módulo)
+    # porque load_env() pode ter rodado depois do import do config.py
+    api_key = os.environ.get("OPENAI_API_KEY", "")
+    if not api_key:
         raise RuntimeError(
             "Defina OPENAI_API_KEY no arquivo .env. "
             "Copie .env.example para .env e preencha sua chave."
         )
     # Import lazy para não forçar a dependência antes do load_env()
     from openai import OpenAI
-    return OpenAI(api_key=OPENAI_API_KEY)
+    return OpenAI(api_key=api_key)
 
 
 # ══════════════════════════════════════════════════════════════════════
