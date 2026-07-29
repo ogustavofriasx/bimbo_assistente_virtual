@@ -33,10 +33,31 @@ def _get_client():
     return OpenAI(api_key=api_key)
 
 
-def _get_player():
+def _get_players():
+    """Retorna lista de players para testar em ordem de preferência."""
     if sys.platform == "darwin":
-        return ["afplay"]
-    return ["aplay", "-q"]
+        return [["afplay"]]
+
+    # Permite fixar o device de áudio via variável de ambiente
+    # Ex: TTS_AUDIO_DEVICE=hdmi:CARD=vc4hdmi0
+    custom = os.environ.get("TTS_AUDIO_DEVICE")
+    if custom:
+        return [
+            ["aplay", "-q", "-D", custom],
+            ["aplay", "-q"],
+            ["paplay"],
+        ]
+
+    # Raspberry Pi: tenta HDMI 1 → HDMI 0 → plughw → default → PulseAudio
+    return [
+        ["aplay", "-q", "-D", "hdmi:CARD=vc4hdmi1"],   # HDMI 1 (mais comum em RPi 4/5)
+        ["aplay", "-q", "-D", "hdmi:CARD=vc4hdmi0"],   # HDMI 0
+        ["aplay", "-q", "-D", "plughw:0,0"],            # plughw card 0
+        ["aplay", "-q", "-D", "plughw:1,0"],            # plughw card 1
+        ["aplay", "-q", "-D", "default"],               # dispositivo default ALSA
+        ["aplay", "-q"],                                 # fallback sem device
+        ["paplay"],                                      # PulseAudio
+    ]
 
 
 def _play_audio(audio_bytes):
@@ -44,13 +65,22 @@ def _play_audio(audio_bytes):
         f.write(audio_bytes)
         tmp_path = f.name
 
+    errors = []
     try:
-        subprocess.run(
-            _get_player() + [tmp_path],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        for player in _get_players():
+            result = subprocess.run(
+                player + [tmp_path],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+            if result.returncode == 0:
+                return
+            # Coleta erro deste player para diagnóstico
+            err = result.stderr.decode().strip()
+            if err:
+                errors.append(f"{' '.join(player)}: {err}")
+        # Todos os players falharam
+        raise RuntimeError("\n".join(errors) if errors else "Nenhum player de áudio funcionou")
     finally:
         os.unlink(tmp_path)
 
