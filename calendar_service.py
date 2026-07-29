@@ -116,9 +116,17 @@ def get_calendar_service():
     # 3. Se expirado, tenta renovar com refresh_token
     if creds and creds.expired and creds.refresh_token:
         log.info("Renovando token OAuth expirado...")
-        creds.refresh(Request())
-        _save_token(creds)
-        log.info("Token renovado e salvo em %s", GOOGLE_TOKEN_PATH)
+        try:
+            creds.refresh(Request())
+            _save_token(creds)
+            log.info("Token renovado e salvo em %s", GOOGLE_TOKEN_PATH)
+        except Exception as e:
+            log.error("Falha ao renovar token: %s", e)
+            log.info("Token refresh expirado/revogado — execute scripts/refresh_token.py")
+            # Descarta credenciais inválidas e remove token.json corrompido
+            creds = None
+            if os.path.exists(GOOGLE_TOKEN_PATH):
+                os.remove(GOOGLE_TOKEN_PATH)
 
     # 4. Se ainda não tem credenciais válidas, faz o fluxo OAuth completo
     if not creds or not creds.valid:
@@ -126,6 +134,14 @@ def get_calendar_service():
             raise RuntimeError(
                 "Defina GOOGLE_CLIENT_ID e GOOGLE_CLIENT_SECRET no arquivo .env "
                 "ou forneça credentials.json."
+            )
+        # Se não há display (Docker headless), não adianta tentar abrir navegador
+        if not os.environ.get("DISPLAY"):
+            raise RuntimeError(
+                "Credenciais OAuth expiradas ou ausentes e não há display "
+                "para reautorizar. Execute 'python scripts/refresh_token.py' "
+                "numa máquina com navegador e atualize GOOGLE_REFRESH_TOKEN "
+                "no arquivo .env."
             )
         log.info("Iniciando fluxo OAuth (abra o navegador)...")
         flow = InstalledAppFlow.from_client_config(
