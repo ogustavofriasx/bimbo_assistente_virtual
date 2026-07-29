@@ -1,226 +1,140 @@
-import io
-import os
-import re
+"""
+Assistente de Voz Bimbo — entry point.
+
+Fluxo principal:
+1. Carrega .env e ativa o filtro de ruído ALSA
+2. Abre o microfone, calibra e entra no loop principal
+3. Aguarda wake word ("oi bimbo") → cumprimenta → entra no chatbot
+4. No chatbot: ouve comandos, transcreve, interpreta intenção,
+   executa ação (calendar ou conversa), responde por voz
+5. Ao sair do chatbot, volta a aguardar a wake word
+
+Este arquivo é apenas orquestração — toda a lógica está nos módulos:
+- config.py   → constantes, logger, fábrica OpenAI
+- audio.py    → microfone, wake word, TTS
+- chat.py     → chatbot, detecção de intenção, dispatcher
+- calendar.py → Google Calendar API
+"""
+
+import signal
 import sys
-import threading
 import time
 
+# ─── 1. Carrega variáveis de ambiente (.env) ─────────────────────────
+from config import load_env
+load_env()
 
-# ─── Carrega .env (necessário fora do Docker) ─────────────────────
-def _load_dotenv(path=".env"):
-    """Carrega variáveis de um arquivo .env sem dependências externas."""
-    if not os.path.exists(path):
-        return
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, _, value = line.partition("=")
-            key, value = key.strip(), value.strip().strip("\"'")
-            if key and key not in os.environ:
-                os.environ[key] = value
+# ─── 2. Ativa filtro de ruído ALSA/JACK/PortAudio ────────────────────
+# O filtro intercepta stderr antes dos imports de áudio, que disparam
+# mensagens de diagnóstico do ALSA ao carregar PyAudio/SpeechRecognition.
+# Ele roda numa thread daemon e filtra linhas por regex.
+from utils import stderr_filter  # noqa: E402 — efeito colateral intencional
 
-
-_load_dotenv()
-
-
-# ─── Filtro de ruído ALSA/JACK/PortAudio ──────────────────────────
-_NOISE_PATTERN = re.compile(
-    r"(ALSA lib|Cannot connect to server|jack server|JackShmReadWrite|"
-    r"capture slave|unable to open slave|Unknown PCM|"
-    r"Unable to find definition|Evaluate error|"
-    r"snd_func_refer|snd_config_expand|snd_pcm_open_noupdate|"
-    r"snd_pcm_asym_open|snd_pcm_dmix_open|snd_ctl_open_noupdate|"
-    r"Invalid CTL)"
-)
-
-_original_stderr_fd = os.dup(2)
-_pipe_read, _pipe_write = os.pipe()
-os.dup2(_pipe_write, 2)
-os.close(_pipe_write)
-
-
-def _filter_stderr():
-    buf = b""
-    while True:
-        try:
-            data = os.read(_pipe_read, 4096)
-            if not data:
-                # EOF — escreve o que sobrou no buffer
-                if buf:
-                    text = buf.decode(errors="replace")
-                    if not _NOISE_PATTERN.search(text):
-                        os.write(_original_stderr_fd, (text + "\n").encode())
-                break
-            buf += data
-            while b"\n" in buf:
-                line, buf = buf.split(b"\n", 1)
-                text = line.decode(errors="replace")
-                if not _NOISE_PATTERN.search(text):
-                    os.write(_original_stderr_fd, (text + "\n").encode())
-        except (OSError, ValueError):
-            if buf:
-                text = buf.decode(errors="replace")
-                if not _NOISE_PATTERN.search(text):
-                    os.write(_original_stderr_fd, text.encode())
-            break
-
-
-_stderr_thread = threading.Thread(target=_filter_stderr, daemon=True)
-_stderr_thread.start()
-
-# ─── Imports de áudio ─────────────────────────────────────────────
+# ─── 3. Imports da aplicação ─────────────────────────────────────────
 import speech_recognition as sr
-from openai import OpenAI
 
-from chatbot import run_chatbot
-from tts import is_speaking, speak_async
-
-# ─── Constantes ───────────────────────────────────────────────────
-WAKE_WORD = "oi bimbo"
-WAKE_KEYWORDS = ["bimbo", "bimbu", "bimba"]  # variantes aceitas
-AMBIENT_DURATION = 0.5
-PHRASE_TIMEOUT = 5
-WAKE_PAUSE = 0.3
-
-# Thresholds para o chatbot (frases longas descrevendo reuniões)
-CHAT_TIMEOUT = 10           # espera até 10s pelo início da fala
-CHAT_PAUSE_THRESHOLD = 2.0  # pausa de até 2s antes de considerar fim da fala
-CHAT_PHRASE_TIME_LIMIT = 30 # até 30s de fala contínua
+from audio import (
+    calibrate_microphone,
+    create_recognizer,
+    is_speaking,
+    listen_for_command,
+    listen_for_wake_word,
+    speak_async,
+)
+from chat import run_chatbot
+from config import WAKE_PAUSE, get_openai_client, log
 
 
-def _contains_wake_word(transcripts):
-    """Verifica se alguma transcrição contém a wake word ou variantes."""
-    for text in transcripts:
-        text = text.casefold().strip(".!? ")
-        if WAKE_WORD in text:
-            return True
-        for kw in WAKE_KEYWORDS:
-            if kw in text:
-                return True
-    return False
+# ══════════════════════════════════════════════════════════════════════
+# Graceful shutdown (SIGINT / SIGTERM)
+# ══════════════════════════════════════════════════════════════════════
+
+_running = True
 
 
-def _get_openai_client():
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        raise RuntimeError("Defina a variável de ambiente OPENAI_API_KEY.")
-    return OpenAI(api_key=api_key)
+def _shutdown(signum, frame):
+    """Handler de sinais para encerramento limpo."""
+    global _running
+    log.info("Encerrando assistente...")
+    _running = False
+    sys.exit(0)
 
+
+signal.signal(signal.SIGINT, _shutdown)
+signal.signal(signal.SIGTERM, _shutdown)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Loop principal
+# ══════════════════════════════════════════════════════════════════════
 
 def main():
-    recognizer = sr.Recognizer()
-    recognizer.energy_threshold = 300
-    recognizer.dynamic_energy_threshold = True
-    recognizer.pause_threshold = 0.5
+    """Orquestra o ciclo de vida completo do assistente."""
+    recognizer = create_recognizer()
 
-    with sr.Microphone() as source:
-        print("Calibrando ruído ambiente...")
-        recognizer.adjust_for_ambient_noise(source, duration=AMBIENT_DURATION)
-        print(f"Pronto. Energia base: {recognizer.energy_threshold:.0f}")
+    try:
+        with sr.Microphone() as source:
+            calibrate_microphone(recognizer, source)
 
-        # ── Loop principal: wake word → chatbot → repete ──
-        while True:
-            # ── Aguarda wake word ──
-            while True:
-                print("Estou ouvindo...")
-                try:
-                    audio = recognizer.listen(
-                        source,
-                        timeout=PHRASE_TIMEOUT,
-                        phrase_time_limit=3,
-                    )
-                    result = recognizer.recognize_google(
-                        audio, language="pt-BR", show_all=True,
-                    )
-                    transcripts = []
-                    if isinstance(result, dict):
-                        for alt in result.get("alternative", []):
-                            t = alt.get("transcript", "")
-                            if t:
-                                transcripts.append(t)
-                    elif isinstance(result, str):
-                        transcripts.append(result)
+            # ── Loop externo: wake word → chatbot → repete ──
+            while _running:
+                # Aguarda a wake word (bloqueante)
+                listen_for_wake_word(source, recognizer)
 
-                    if transcripts:
-                        print(f"  Ouvido: {transcripts[0]}")
-                except sr.WaitTimeoutError:
-                    continue
-                except sr.UnknownValueError:
-                    continue
-                except sr.RequestError as e:
-                    print("Falha no serviço de reconhecimento:", e)
-                    continue
+                # Wake word detectada — cumprimenta e inicia chatbot
+                client = get_openai_client()
+                greeting = "Olá! Em que posso ajudar?"
+                speak_async(greeting, client)  # TTS em background
+                log.info("Bimbo: %s", greeting)
+                time.sleep(WAKE_PAUSE)
 
-                if _contains_wake_word(transcripts):
-                    break
+                # ── Loop interno: chatbot (comandos do usuário) ──
+                while _running:
+                    # Espera o TTS terminar antes de abrir o microfone
+                    # (evita que o assistente ouça a própria voz)
+                    while is_speaking():
+                        time.sleep(0.1)
 
-            # ── Wake word detectada ──
-            print("Comando de ativação detectado")
-            client = _get_openai_client()
-            greeting = "Olá! Em que posso ajudar?"
-            speak_async(greeting, client)  # dispara TTS antes do print
-            print("Bimbo:", greeting)
-            time.sleep(WAKE_PAUSE)
+                    # Captura e transcreve o comando do usuário
+                    user_text = listen_for_command(source, recognizer, client)
 
-            # ── Loop do chatbot ──
-            recognizer.pause_threshold = CHAT_PAUSE_THRESHOLD
+                    if user_text is None:
+                        # Timeout — usuário não falou nada
+                        prompt = "Não ouvi nada. Ainda está aí?"
+                        speak_async(prompt, client)
+                        log.info("Bimbo: %s", prompt)
+                        time.sleep(2)
+                        continue
 
-            while True:
-                # Espera o TTS terminar antes de abrir o microfone
-                # (evita que o assistente ouça a própria voz)
-                while is_speaking():
-                    time.sleep(0.1)
+                    if not user_text:
+                        continue
 
-                print("Estou ouvindo...")
-                try:
-                    audio = recognizer.listen(
-                        source,
-                        timeout=CHAT_TIMEOUT,
-                        phrase_time_limit=CHAT_PHRASE_TIME_LIMIT,
-                    )
-                except sr.WaitTimeoutError:
-                    prompt = "Não ouvi nada. Ainda está aí?"
-                    speak_async(prompt, client)
-                    print("Bimbo:", prompt)
-                    time.sleep(2)
-                    continue
+                    log.info("Você: %s", user_text)
 
-                audio_file = io.BytesIO(audio.get_wav_data())
-                audio_file.name = "comando.wav"
+                    # Processa com o chatbot
+                    response_text, should_exit = run_chatbot(user_text, client)
+                    speak_async(response_text, client)
+                    log.info("Bimbo: %s", response_text)
 
-                transcription = client.audio.transcriptions.create(
-                    model="gpt-4o-mini-transcribe",
-                    file=audio_file,
-                    language="pt",
+                    if should_exit:
+                        break
+
+                # Restaura threshold curto para detecção da wake word
+                recognizer.pause_threshold = 0.5
+                log.info(
+                    "Chatbot encerrado. Diga 'oi bimbo' para ativar novamente."
                 )
-                user_text = transcription.text.strip()
-                if not user_text:
-                    continue
 
-                print("Você:", user_text)
-
-                response_text, should_exit = run_chatbot(user_text, client)
-                speak_async(response_text, client)  # dispara TTS antes do print
-                print("Bimbo:", response_text)
-
-                if should_exit:
-                    break
-
-            # Restaura threshold curto pra detecção da wake word
-            recognizer.pause_threshold = 0.5
-
-            print("Chatbot encerrado. Diga 'oi bimbo' para ativar novamente.")
+    except OSError as error:
+        if "No Default Input Device" in str(error):
+            log.error("Nenhum microfone encontrado.")
+            log.error("No macOS, rode fora do Docker: python main.py")
+            log.error(
+                "No Raspberry Pi, conecte o microfone USB e tente novamente."
+            )
+            sys.exit(0)
+        raise
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except OSError as error:
-        if "No Default Input Device" in str(error):
-            print("Nenhum microfone encontrado.")
-            print("No macOS, rode fora do Docker: python main.py")
-            print("No Raspberry Pi, conecte o microfone USB e tente novamente.")
-            sys.exit(0)
-        raise
+    main()
