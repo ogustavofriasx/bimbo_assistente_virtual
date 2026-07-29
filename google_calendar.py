@@ -73,8 +73,11 @@ def get_calendar_service():
             shutil.rmtree(TOKEN_PATH, ignore_errors=True)
         else:
             creds = Credentials.from_authorized_user_file(TOKEN_PATH, SCOPES)
+            # Se expirado e sem refresh_token, descarta — .env pode ter um válido
+            if creds and creds.expired and not creds.refresh_token:
+                creds = None
 
-    # 2. Fallback: monta credenciais a partir do .env
+    # 2. Fallback: monta credenciais a partir do .env (tem refresh_token)
     if not creds:
         creds = _credentials_from_env()
 
