@@ -26,7 +26,13 @@ CLIENT_CONFIG = {
 }
 
 flow = InstalledAppFlow.from_client_config(CLIENT_CONFIG, SCOPES)
-creds = flow.run_local_server(port=0)
+
+# Auto-detecta: se tem display usa navegador, senão usa console (cola URL)
+if os.environ.get("DISPLAY"):
+    creds = flow.run_local_server(port=0)
+else:
+    flow.run_console()
+    creds = flow.credentials
 
 print("\n✅ Autorização concluída!")
 print(f"\nAccess Token:  {creds.token}")
