@@ -27,11 +27,18 @@ CLIENT_CONFIG = {
 
 flow = InstalledAppFlow.from_client_config(CLIENT_CONFIG, SCOPES)
 
-# Auto-detecta: se tem display usa navegador, senão usa console (cola URL)
-if os.environ.get("DISPLAY"):
-    creds = flow.run_local_server(port=0)
-else:
-    flow.run_console()
+# Abre navegador automaticamente (funciona no Mac e RPi com display)
+# Se falhar, mostra URL manual e pede o código
+try:
+    creds = flow.run_local_server(
+        port=0,
+        authorization_prompt_message="\nAbra esta URL no navegador:\n{url}\n",
+    )
+except Exception:
+    auth_url, _ = flow.authorization_url(prompt="consent", access_type="offline")
+    print(f"\nNão foi possível abrir o navegador. Acesse esta URL:\n\n{auth_url}\n")
+    code = input("Cole o código de autorização: ").strip()
+    flow.fetch_token(code=code)
     creds = flow.credentials
 
 print("\n✅ Autorização concluída!")
