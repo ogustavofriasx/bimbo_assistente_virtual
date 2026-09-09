@@ -2,7 +2,10 @@
 .gitignore
 .env
 env
+.venv
+venv
 __pycache__
 audios
 *.json
 *.pyc
+.DS_Store

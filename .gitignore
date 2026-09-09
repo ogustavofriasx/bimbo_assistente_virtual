@@ -1,7 +1,18 @@
-__pycache__
+__pycache__/
+*.py[cod]
 
-audios
+.venv/
+venv/
+env/
+
+audios/
 
 *.json
 
 .env
+.env.*
+!.env.example
+
+.DS_Store
+.idea/
+.vscode/
